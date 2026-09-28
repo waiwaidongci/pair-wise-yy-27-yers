@@ -144,6 +144,18 @@ class CollationDB:
               reason TEXT NOT NULL DEFAULT '',
               locked_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS variant_evidence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              variant_id INTEGER NOT NULL REFERENCES variants(id) ON DELETE CASCADE,
+              passage_id INTEGER NOT NULL REFERENCES passages(id),
+              witness_id INTEGER NOT NULL REFERENCES witnesses(id),
+              quote TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified')),
+              created_by INTEGER NOT NULL REFERENCES users(id),
+              created_at TEXT NOT NULL,
+              verified_by INTEGER REFERENCES users(id),
+              verified_at TEXT
+            );
             """
         )
         self.conn.commit()
@@ -162,6 +174,9 @@ class CollationDB:
         self.align_passage(passage, w2, "春水东流，[不可辨][不可辨]。", 2, owner)
         variant = self.create_variant(passage, w2, "春水东流，故人南去。", "综合语义与行款补足", owner, 0)
         self.add_note(variant, "补字仍需参照纸背墨迹。", editor)
+        checked = self.add_evidence(variant, passage, w1, "故人南去", editor)
+        self.verify_evidence(checked, owner)
+        self.add_evidence(variant, passage, w1, "春水东流", editor)
 
     def add_user(self, name: str, role: str) -> int:
         if not name.strip() or role not in {"owner", "editor", "reviewer"}:
@@ -319,6 +334,10 @@ class CollationDB:
                 "UPDATE variants SET proposed_text=?,reason=?,layer=?,updated_at=? WHERE id=?",
                 (text, reason.strip(), layer, datetime.now().isoformat(), variant_id),
             )
+            self.conn.execute(
+                "UPDATE variant_evidence SET status='pending',verified_by=NULL,verified_at=NULL WHERE variant_id=?",
+                (variant_id,),
+            )
             revision = self._record_revision(variant["passage_id"], variant_id, layer, user_id)
             self.conn.execute("UPDATE passages SET revision=?,updated_by=?,updated_at=? WHERE id=?", (revision, user_id, datetime.now().isoformat(), variant["passage_id"]))
         return revision
@@ -345,6 +364,12 @@ class CollationDB:
                 "SELECT a.*,w.siglum,w.kind FROM alignments a JOIN witnesses w ON w.id=a.witness_id WHERE a.passage_id=? ORDER BY a.sort_order",
                 (passage_id,),
             ).fetchall()],
+            "evidence": [dict(r) for r in self.conn.execute(
+                "SELECT e.*,p.label AS passage_label,w.siglum FROM variant_evidence e "
+                "JOIN passages p ON p.id=e.passage_id JOIN witnesses w ON w.id=e.witness_id "
+                "WHERE e.variant_id=? ORDER BY e.id",
+                (variant_id,),
+            ).fetchall()],
         }
         self.conn.execute(
             "INSERT INTO revisions(passage_id,variant_id,revision_no,layer,snapshot_json,author_id,created_at) VALUES(?,?,?,?,?,?,?)",
@@ -367,11 +392,77 @@ class CollationDB:
             )
         return int(cur.lastrowid)
 
+    def add_evidence(self, variant_id: int, passage_id: int, witness_id: int, quote: str, user_id: int) -> int:
+        variant = self.conn.execute(
+            "SELECT v.*,pa.work_id AS work_id FROM variants v JOIN passages pa ON pa.id=v.passage_id WHERE v.id=?",
+            (variant_id,),
+        ).fetchone()
+        if not variant:
+            raise DomainError("异文不存在")
+        work_id = variant["work_id"]
+        if not self.can_view_work(work_id, user_id):
+            raise DomainError("无权为该异文登记旁证")
+        passage = self.conn.execute("SELECT * FROM passages WHERE id=?", (passage_id,)).fetchone()
+        witness = self.conn.execute("SELECT * FROM witnesses WHERE id=?", (witness_id,)).fetchone()
+        if not passage or not witness or passage["work_id"] != work_id or witness["work_id"] != work_id:
+            raise DomainError("旁证段落与版本必须与原异文同属一部作品")
+        alignment = self.conn.execute(
+            "SELECT aligned_text FROM alignments WHERE passage_id=? AND witness_id=?",
+            (passage_id, witness_id),
+        ).fetchone()
+        if not alignment:
+            raise DomainError("该版本尚未对齐所选段落")
+        quote = quote.strip()
+        if not quote:
+            raise DomainError("旁证引文不能为空")
+        if quote not in alignment["aligned_text"]:
+            raise DomainError("引文必须能在该版本的对齐文字中逐字找到")
+        with self.transaction():
+            cur = self.conn.execute(
+                "INSERT INTO variant_evidence(variant_id,passage_id,witness_id,quote,status,created_by,created_at) "
+                "VALUES(?,?,?,?,'pending',?,?)",
+                (variant_id, passage_id, witness_id, quote, user_id, datetime.now().isoformat()),
+            )
+        return int(cur.lastrowid)
+
+    def verify_evidence(self, evidence_id: int, user_id: int) -> None:
+        evidence = self.conn.execute(
+            "SELECT e.*,pa.work_id AS work_id FROM variant_evidence e "
+            "JOIN passages pa ON pa.id=e.passage_id WHERE e.id=?",
+            (evidence_id,),
+        ).fetchone()
+        if not evidence:
+            raise DomainError("旁证不存在")
+        if not self.can_view_work(evidence["work_id"], user_id):
+            raise DomainError("无权核对该旁证")
+        if evidence["created_by"] == user_id:
+            raise DomainError("提交者不能自审旁证")
+        if evidence["status"] != "pending":
+            raise DomainError("该旁证已核对，无需重复核对")
+        alignment = self.conn.execute(
+            "SELECT aligned_text FROM alignments WHERE passage_id=? AND witness_id=?",
+            (evidence["passage_id"], evidence["witness_id"]),
+        ).fetchone()
+        if not alignment or evidence["quote"] not in alignment["aligned_text"]:
+            raise DomainError("旁证引文已无法在对齐文字中逐字找到，不能核对")
+        with self.transaction():
+            self.conn.execute(
+                "UPDATE variant_evidence SET status='verified',verified_by=?,verified_at=? WHERE id=?",
+                (user_id, datetime.now().isoformat(), evidence_id),
+            )
+
     def lock_passage(self, passage_id: int, user_id: int, reason: str = "") -> None:
         passage = self.conn.execute("SELECT * FROM passages WHERE id=?", (passage_id,)).fetchone()
         if not passage:
             raise DomainError("段落不存在")
         self._require_owner(passage["work_id"], user_id)
+        pending = self.conn.execute(
+            "SELECT COUNT(*) FROM variant_evidence e JOIN variants v ON v.id=e.variant_id "
+            "WHERE v.passage_id=? AND e.status='pending'",
+            (passage_id,),
+        ).fetchone()[0]
+        if pending:
+            raise DomainError(f"还有 {pending} 条旁证未核对，不能锁定段落")
         with self.transaction():
             self.conn.execute("UPDATE passages SET status='locked',updated_by=?,updated_at=? WHERE id=?", (user_id, datetime.now().isoformat(), passage_id))
             self.conn.execute(
@@ -395,6 +486,7 @@ class CollationDB:
         witnesses = [dict(r) for r in self.conn.execute("SELECT * FROM witnesses WHERE work_id=? ORDER BY id", (work_id,))]
         passages = []
         gaps = 0
+        pending_total = 0
         for passage in self.conn.execute("SELECT * FROM passages WHERE work_id=? ORDER BY id", (work_id,)).fetchall():
             alignments = []
             for row in self.conn.execute(
@@ -407,12 +499,32 @@ class CollationDB:
                     gaps += 1
                 alignments.append(item)
             variants = []
+            passage_pending = 0
             for row in self.conn.execute("SELECT * FROM variants WHERE passage_id=? ORDER BY witness_id,layer,id", (passage["id"],)).fetchall():
                 variant = dict(row)
                 variant["notes"] = [dict(r) for r in self.conn.execute("SELECT * FROM notes WHERE variant_id=? ORDER BY id", (row["id"],))]
+                evidence = [dict(r) for r in self.conn.execute(
+                    "SELECT e.*,p.label AS passage_label,w.siglum, "
+                    "uc.name AS created_by_name,uv.name AS verified_by_name "
+                    "FROM variant_evidence e "
+                    "JOIN passages p ON p.id=e.passage_id JOIN witnesses w ON w.id=e.witness_id "
+                    "JOIN users uc ON uc.id=e.created_by LEFT JOIN users uv ON uv.id=e.verified_by "
+                    "WHERE e.variant_id=? ORDER BY e.id",
+                    (row["id"],),
+                ).fetchall()]
+                variant["evidence"] = evidence
+                variant["evidence_pending_count"] = sum(1 for e in evidence if e["status"] == "pending")
+                passage_pending += variant["evidence_pending_count"]
                 variants.append(variant)
-            passages.append({**dict(passage), "alignments": alignments, "variants": variants})
-        return {"work": dict(work), "witnesses": witnesses, "passages": passages, "gap_count": gaps}
+            pending_total += passage_pending
+            passages.append({
+                **dict(passage), "alignments": alignments, "variants": variants,
+                "evidence_pending_count": passage_pending,
+            })
+        return {
+            "work": dict(work), "witnesses": witnesses, "passages": passages,
+            "gap_count": gaps, "evidence_pending_count": pending_total,
+        }
 
     def snapshot(self) -> dict:
         return {
