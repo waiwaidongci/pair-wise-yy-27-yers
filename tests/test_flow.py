@@ -36,5 +36,61 @@ class CollationFlowTest(unittest.TestCase):
             self.db.export_collation(self.work,self.outsider)
         with self.assertRaisesRegex(DomainError,"括号"):
             self.db.align_passage(self.passage,self.w1,"文本[未闭合",9,self.owner)
+    def test_evidence_register_verify_export(self):
+        variant=self.db.create_variant(self.passage,self.w2,"春水东流，故人南去。","按甲本补足",self.editor,0)
+        ev=self.db.add_evidence(variant,self.passage,self.w1,"春水东流，故人南去。",self.editor)
+        exported=self.db.export_collation(self.work,self.reviewer)
+        item=exported["passages"][0]["variants"][0]
+        self.assertEqual(1,item["pending_evidence_count"])
+        self.assertEqual(1,exported["pending_evidence_count"])
+        self.assertIsNone(item["evidences"][0]["verified_by_name"])
+        # 提交者不能自审
+        with self.assertRaisesRegex(DomainError,"不能核对"):
+            self.db.verify_evidence(ev,self.editor)
+        # 无查看权限的外部用户不能核对
+        with self.assertRaisesRegex(DomainError,"无权核对"):
+            self.db.verify_evidence(ev,self.outsider)
+        self.db.verify_evidence(ev,self.reviewer)
+        exported=self.db.export_collation(self.work,self.reviewer)
+        evrow=exported["passages"][0]["variants"][0]["evidences"][0]
+        self.assertEqual("verified",evrow["status"])
+        self.assertEqual("审阅",evrow["verified_by_name"])
+        self.assertEqual("编辑",evrow["submitted_by_name"])
+        self.assertEqual(0,exported["pending_evidence_count"])
+    def test_evidence_quotation_must_be_verbatim_in_same_work(self):
+        variant=self.db.create_variant(self.passage,self.w2,"春水东流，故人南去。","按甲本补足",self.editor,0)
+        with self.assertRaisesRegex(DomainError,"逐字"):
+            self.db.add_evidence(variant,self.passage,self.w1,"春水流，故人去。",self.editor)
+        w3=self.db.add_witness(self.work,"丙本","transcription")
+        with self.assertRaisesRegex(DomainError,"尚未对齐"):
+            self.db.add_evidence(variant,self.passage,w3,"春水",self.editor)
+        with self.assertRaisesRegex(DomainError,"无权登记"):
+            self.db.add_evidence(variant,self.passage,self.w1,"春水东流，故人南去。",self.outsider)
+        # 另一部作品的版本与段落不能作为旁证出处
+        work2=self.db.create_work("他书","另一作品",self.owner)
+        w3=self.db.add_witness(work2,"丙本","version")
+        p2=self.db.add_passage(work2,"第一节","春水东流，故人南去。",self.owner)
+        self.db.align_passage(p2,w3,"春水东流，故人南去。",1,self.owner)
+        with self.assertRaisesRegex(DomainError,"同属一部作品"):
+            self.db.add_evidence(variant,p2,w3,"春水东流，故人南去。",self.editor)
+        self.db.grant_work_access(self.work,self.outsider,"view",self.owner)
+        with self.assertRaisesRegex(DomainError,"同属一部作品"):
+            self.db.add_evidence(variant,p2,w3,"春水东流，故人南去。",self.outsider)
+    def test_new_layer_invalidates_evidence_and_blocks_lock(self):
+        variant=self.db.create_variant(self.passage,self.w2,"春水东流，故人南去。","按甲本补足",self.editor,0)
+        ev=self.db.add_evidence(variant,self.passage,self.w1,"春水东流，故人南去。",self.editor)
+        self.db.verify_evidence(ev,self.reviewer)
+        # 异文改出新层，旁证失效，锁定被挡
+        self.db.update_variant(variant,"春水东流，[不可辨]人南去。","重新考虑墨痕",self.editor,1)
+        with self.assertRaisesRegex(DomainError,"旁证待核"):
+            self.db.lock_passage(self.passage,self.owner,"定稿")
+        # 重新核对后才可以锁定
+        self.db.verify_evidence(ev,self.reviewer)
+        self.db.lock_passage(self.passage,self.owner,"定稿")
+        with self.assertRaisesRegex(DomainError,"锁定"):
+            self.db.add_evidence(variant,self.passage,self.w1,"春水",self.editor)
+    def test_variant_without_evidence_does_not_block_lock(self):
+        self.db.create_variant(self.passage,self.w2,"春水东流，故人南去。","按义补足",self.editor,0)
+        self.db.lock_passage(self.passage,self.owner,"定稿")
 
 if __name__=="__main__": unittest.main()

@@ -19,6 +19,10 @@ python -m unittest discover -s tests -v
 - `[缺页]`、`[不可辨]`、`[残损]` 等标记会参与校勘稿导出和缺口统计，不匹配的方括号会拒绝保存。
 - 每次新增或修改异文都会产生递增修订号和 JSON 快照；提交必须携带 `expected_revision`，旧页面不能覆盖新层。
 - 锁定段落由负责人执行，锁定后任何新修订都会被拒绝。
+- 旁证登记在异文上：出处段落与版本必须与异文同属一部作品，引文必须能在该版本的对齐文字中逐字找到；同一条旁证不能重复登记。
+- 有作品查看权限的人可以核对旁证，但旁证提交者不能核对自己的旁证。
+- 异文提交新层后，其全部旁证重置为待核，需要重新核对。
+- 已登记旁证的异文若仍有待核条目，会挡住段落锁定；从未登记旁证的异文不拦锁定。
 
 ## 主要接口
 
@@ -27,8 +31,9 @@ python -m unittest discover -s tests -v
 - `POST /api/works/{id}/passages`、`POST /api/works/{id}/access`
 - `POST /api/alignments`
 - `POST /api/variants`、`POST /api/variants/{id}/revisions`
+- `POST /api/variants/{id}/evidences`（登记旁证）、`POST /api/evidences/{id}/verify`（核对旁证）
 - `GET /api/passages/{id}/snapshots/{revision}?user_id=...`
 - `POST /api/passages/{id}/lock`
 - `GET /api/works/{id}/collation?user_id=...`
 
-导出接口把版本对齐、异文、注释、残损缺口和锁定状态组合成可复核的校勘稿。
+导出接口把版本对齐、异文、注释、旁证（含提交者与核对方姓名）、残损缺口、锁定状态和待核旁证数量组合成可复核的校勘稿。

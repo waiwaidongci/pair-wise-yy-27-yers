@@ -42,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/api/alignments": return self._json(201,{"ok":True,"id":self.db.align_passage(int(b.get("passage_id",0)),int(b.get("witness_id",0)),str(b.get("aligned_text","")),int(b.get("sort_order",0)),int(b.get("user_id",0)))})
             if path=="/api/variants": return self._json(201,{"ok":True,"id":self.db.create_variant(int(b.get("passage_id",0)),int(b.get("witness_id",0)),str(b.get("proposed_text","")),str(b.get("reason","")),int(b.get("user_id",0)),int(b.get("expected_revision",0)))})
             if len(parts)==4 and parts[:2]==["api","variants"] and parts[3]=="revisions": return self._json(200,{"ok":True,"revision":self.db.update_variant(int(parts[2]),str(b.get("proposed_text","")),str(b.get("reason","")),int(b.get("user_id",0)),int(b.get("expected_revision",0)))})
+            if len(parts)==4 and parts[:2]==["api","variants"] and parts[3]=="evidences": return self._json(201,{"ok":True,"id":self.db.add_evidence(int(parts[2]),int(b.get("passage_id",0)),int(b.get("witness_id",0)),str(b.get("quotation","")),int(b.get("user_id",0)))})
+            if len(parts)==4 and parts[:2]==["api","evidences"] and parts[3]=="verify": self.db.verify_evidence(int(parts[2]),int(b.get("user_id",0))); return self._json(200,{"ok":True})
             if path=="/api/notes": return self._json(201,{"ok":True,"id":self.db.add_note(int(b.get("variant_id",0)),str(b.get("body","")),int(b.get("user_id",0)))})
             if len(parts)==4 and parts[:2]==["api","passages"] and parts[3]=="lock": self.db.lock_passage(int(parts[2]),int(b.get("user_id",0)),str(b.get("reason",""))); return self._json(200,{"ok":True})
             self._json(404,{"ok":False,"error":"接口不存在"})
